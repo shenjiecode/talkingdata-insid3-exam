@@ -1,119 +1,47 @@
 # INSID3：位置去偏后的跨图匹配
 
-本仓库完成 INSID3 论文与代码理解实操的三部分内容。第一题用 NumPy 实现位置去偏后的跨图匹配，第二题提供一个可验证的编程考点，第三题给出所提供代码的语义审核。
+使用 NumPy 处理已提取的特征，在 CPU 上运行，无需 DINOv3 权重或外部数据集。
 
-计算只涉及已提取的特征和合成测试数据，在 CPU 上运行，不需要 DINOv3 权重或外部数据集。
+## 论文与代码定位
 
-## 运行与结果
+| 内容 | 说明 |
+| --- | --- |
+| 论文依据 | [INSID3 §3.1](https://arxiv.org/abs/2603.28480)：式 (3) 后通过 SVD 估计位置子空间；式 (4) 对参考与目标特征去偏；式 (2) 从参考掩码区域计算原型，再与目标 patch 比较。 |
+| 作者代码依据 | `models/insid3.py` 中，[`_build_positional_basis`, L246–261](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L246-L261) 归一化、中心化 probe 并提取位置基；[`_debias_features`, L263–271](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L263-L271) 投影去偏后重新归一化；[`predict_mask`, L136–158](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L136-L158) 归一化输入 patch 并计算参考原型；[`_locate_candidates`, L285–286](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L285-L286) 计算跨图点积。 |
+| 我的理解 | 不同图像中相同坐标的特征可能因位置编码而相似。低语义 probe 用来估计这些方向，再对参考与目标使用同一个正交补投影，抑制跨图比较中的位置干扰。参考掩码决定要匹配的区域。 |
 
-要求 Python 3.10 或更高版本。在仓库根目录安装依赖后运行：
+源码链接固定到 commit `0c165a10cf52ab91f335883d06260de86854adbe`。本仓库先提交论文与代码定位，再实现函数，最后编写并运行测试。
+
+## 实现说明
+
+函数位于 `src/insid3_matching.py`。probe 逐 patch 做 L2 归一化，展开成 `(P,C)`，按通道中心化，再取 SVD 的前 `r` 个右奇异向量。作者代码使用 `(C,P)` 排列，因此对应左奇异向量。
+
+参考与目标 patch 先归一化，再计算 `X - (X B) Bᵀ` 并重新归一化。只对 probe 做中心化。参考掩码内的去偏 patch 求均值后再次归一化，与目标去偏特征点积，返回 `basis`、`reference_prototype` 和 `similarity_map`。
+
+- `rank` 为非负整数，`r = min(rank, Hp*Wp, C)`；`rank=0` 不去除方向。不按数值秩截断，秩亏时零奇异值对应方向不唯一。
+- 归一化使用 `x / max(||x||₂, 1e-12)`，零向量保持零。计算使用 float64，不修改输入。
+- 三个网格可为不同的非方形尺寸，但通道数必须一致。空参考掩码、形状不匹配、非二值掩码、非有限特征或非法 `rank` 均明确报错。
+
+## 测试
+
+要求 Python 3.10 或更高版本。在仓库根目录运行：
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pytest -q
 ```
 
-实际验证环境：Windows、Python 3.12.8、NumPy 2.5.3、pytest 9.1.1。
-首次运行结果为 `43 passed in 0.69s`，文档整理后的复查结果为 `43 passed in 0.12s`。其中包括：
+实际结果：`43 passed in 0.12s`。验证环境为 Windows、Python 3.12.8、NumPy 2.5.3、pytest 9.1.1。
 
-- 位置基的维度、正交性、主方向及投影性质；用 `BBᵀ` 比较子空间，避免依赖 SVD 的符号。
-- probe 归一化与中心化的顺序、去偏后归一化、掩码均值原型的归一化。
-- 语义与位置冲突的合成例子、掩码变化、非方形且尺寸不同的网格。
-- `rank=0`、rank 上限、秩亏 probe、零特征、均值抵消、非法输入及输入不被修改。
-- 独立缩放每个 patch、统一旋转通道空间后，相似度保持一致。
+`tests/test_insid3_matching.py` 覆盖位置基的维度与正交性、归一化顺序、位置与语义冲突、掩码变化、`rank=0`、非方形网格、空掩码、非法输入及输入不被修改。
+合成例子中，“语义相同、位置相反”的得分从 `-99/101` 变为 `1`，“位置相同、语义无关”的得分从 `100/101` 变为 `0`。
 
-其中一个可手算的例子：参考特征为 `(10,1,0)`，目标分别为 `(-10,1,0)` 和 `(10,0,1)`，probe 估计出第一通道的位置方向。
+## 加分项
 
-| 匹配对象 | 未去偏 | 去偏后 |
-| --- | --- | --- |
-| 语义相同、位置相反 | `-99/101 ≈ -0.980198` | `1` |
-| 位置相同、语义无关 | `100/101 ≈ 0.990099` | `0` |
+第二题见 [题面](bonus/bonus_task.md)、[设计说明](bonus/bonus_design.md) 和 `bonus/test_bonus_task.py`。将待测模型答案放入 `src/insid3_bonus.py` 后，运行 `python -m pytest -q bonus/test_bonus_task.py`。默认测试命令只运行第一题。
 
-这验证了构造数据中的位置干扰被去除；不据此宣称真实图像上的分割性能。
+第三题见 [审核结论](manual_review_1_1_1.md)。
 
-## 文件
+## AI 使用说明
 
-| 路径 | 内容 |
-| --- | --- |
-| `src/insid3_matching.py` | 第一题的 `compute_debiased_similarity` |
-| `tests/test_insid3_matching.py` | 第一题自动测试 |
-| `bonus/bonus_task.md` | 交给模型的独立编程题面 |
-| `bonus/bonus_design.md` | 考点、代码依据和预期错误 |
-| `bonus/test_bonus_task.py` | 放入模型答案后运行的加分测试 |
-| `manual_review_1_1_1.md` | 第三题审核，结论为“不正确” |
-
-## 论文与代码定位
-
-实现顺序是先读论文、定位作者代码，再写函数，最后写测试并运行。
-Git 历史中的 `0ec586e` 记录了编码前的定位和接口约定，`23c9e4e` 添加核心函数，`e74f963` 添加测试和加分项。
-
-资料版本：论文 [INSID3, §3.1](https://arxiv.org/abs/2603.28480)；
-[论文阅读版](https://github.com/TD-ding/insid3-paper-materials/blob/0257099e2266df1db853e82a5e55276efdcebafb/paper.md)；
-作者仓库固定 commit `0c165a10cf52ab91f335883d06260de86854adbe`。
-
-| 内容 | 定位与理解 |
-| --- | --- |
-| 论文依据 | §3.1 “Unlocking the DINOv3 feature space”：式 (3) 后对低语义 probe 特征做 SVD，取通道空间的主方向；式 (4) 用同一个正交补去除参考与目标的位置成分；式 (2) 用掩码区域均值形成参考原型并计算目标相似度。 |
-| 作者代码依据：位置基 | [`models/insid3.py::_build_positional_basis`, L246–261](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L246-L261)：patch L2 归一化，将特征排列为 `(C,P)`，沿全部 patch 减去通道均值，然后取 SVD 的左奇异向量。对于本题的 `(P,C)` 排列，等价于取**右**奇异向量。 |
-| 作者代码依据：去偏 | [`predict_mask`, L136–147](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L136-L147) 与 [`_debias_features`, L263–271](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L263-L271)：参考、目标 patch 先归一化，再投影到位置基的正交补，最后逐 patch 重新归一化。 |
-| 作者代码依据：跨图匹配 | [`predict_mask`, L149–158](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L149-L158) 对参考掩码内去偏 patch 求均值并归一化；[`_locate_candidates`, L285–286](https://github.com/visinf/INSID3/blob/0c165a10cf52ab91f335883d06260de86854adbe/models/insid3.py#L285-L286) 计算去偏目标与参考原型的点积。本题止于该连续相似度图，不执行随后的候选筛选。 |
-| 我的理解 | 不同图像中相同坐标可能因为位置编码而相似。低语义 probe 估计这些通道方向，对参考与目标使用**同一个**投影，可以在跨图匹配前抑制这种非语义对应。掩码决定要匹配的参考概念，归一化后的点积衡量方向相似度。论文 §3 的原始特征用于图内聚类这一支路不属于第一题。 |
-
-### 论文简写与代码细节
-
-- 论文描述 Gaussian noise 输入，当前作者代码使用经图像标准化的全零图像构造低语义输入。本题接收现成 probe 特征，既不生成图像，也不提取特征。
-- 论文式 (3)–(4) 没有展开 patch 归一化和 probe 中心化；本实现以作者代码补全这些细节。
-- **只对归一化后的 probe 按通道中心化**；不对参考与目标减去 probe 均值，也不对它们各自做中心化。
-- 单参考图场景中，先平均掩码内已去偏并归一化的 patch，再归一化原型；不对原始特征先平均再去偏。
-
-## 实现约定（编码前确定）
-
-令 `N(x) = x / max(||x||₂, 1e-12)`（逐 patch）。
-将 probe 按行优先顺序展开为 `P×C`，构造 `E = N(probe) - mean_patch(N(probe))`。
-取 `E = U Σ Vᵀ` 的前 `r` 个右奇异向量组成 `B ∈ R^(C×r)`。
-
-参考与目标分别计算 `D(X) = N(N(X) - (N(X) B) Bᵀ)`；
-返回 `p = N(mean(D(reference)[mask]))` 和 `D(target) @ p`，相似度恢复为目标网格形状。
-
-- `rank` 为非负整数（不接受布尔值）；`r = min(rank, Hp*Wp, C)`，与作者的 reduced SVD 切片上限一致。
-- `rank=0` 返回 `(C,0)` 空基，仍执行 patch 与原型归一化。
-- 不按数值秩自动缩减 `r`，以保持作者行为；超过有效信号秩时，零奇异值对应方向不唯一，可能去掉语义信息。SVD 基的符号本身也不唯一。
-- 输入特征必须是非空三维有限实数数组且通道一致；参考掩码必须匹配参考网格并只含 0/1 或布尔值。参考、目标和 probe 的空间形状可以不同，也可以非方形。
-- 空参考掩码、非法维度、非有限值、非法 `rank` 明确报错；不会将空前景伪装成有效匹配。作者单图全空掩码会在空列表堆叠时失败，本实现给出明确异常。
-- 零向量保持为零；投影后或区域均值为零时，相应表示和点积为零。极小非零向量按 `1e-12` 下限缩放。
-- 使用 float64 计算；不修改输入。此处的数值健壮性、输入校验和异常信息是本题接口约定，并非声称作者已实现相同校验。
-
-## 第二题的验证方式
-
-第二题选择“种子评分与聚合评分的区别”。作者选种子时用归一化的区域均值原型，聚合时却用区域内逐 patch 相似度的均值，还会乘以候选覆盖比例。这两步如果误用同一种评分，会在设计的例子中多选一个 cluster。
-
-按第二题要求，仓库只提供题目、设计说明和测试，不附待测模型的答案。
-后续将模型实现放入 `src/insid3_bonus.py` 后，运行：
-
-```bash
-python -m pytest -q bonus/test_bonus_task.py
-```
-
-默认测试命令通过 `pytest.ini` 的 `testpaths=tests` 只运行第一题。显式运行第二题时，如果模型答案尚未放入，会明确报错，不会跳过后算作通过。
-
-为检查这些断言是否有效，本地用一份按作者流程写的临时实现运行，结果为 **5 passed**；随后每次只改一种逻辑，得到下表结果。临时实现保留在提交仓库外，测试支持通过 `INSID3_BONUS_SOLUTION` 指定这样的待测文件。这是对测试的自检，**没有调用 GPT-5.5，也没有声称 GPT-5.5 已经失败**。
-
-| 人为引入的错误 | 加分测试结果 |
-| --- | --- |
-| 聚合时改用归一化均值原型的分数 | 1 failed, 4 passed |
-| 图内相似度误用去偏特征 | 1 failed, 4 passed |
-| 省略覆盖比例 | 3 failed, 2 passed |
-| 不修改种子的覆盖权重 | 3 failed, 2 passed |
-| 在所有 cluster 中选种子 | 1 failed, 4 passed |
-| 将严格 `>` 改为 `>=` | 2 failed, 3 passed |
-| 无条件把种子并回最终掩码 | 1 failed, 4 passed |
-| 只返回候选 patch，不恢复整个 cluster | 3 failed, 2 passed |
-
-阈值测试使用单位坐标向量和 `1/2` 覆盖比例，确保预期分数可以精确表示，避免把浮点舍入误差误判为语义错误。
-
-## AI 使用与人工核验
-
-本次使用 Codex 辅助阅读论文与作者代码、实现函数、构造并运行测试、设计第二题，以及撰写第三题审核。中文说明还使用了 [shuorenhua](https://github.com/MrGeDiao/shuorenhua) 的技术文档润色规则，保留公式、代码位置、数值和判断依据。
-
-上面的测试及加分测试自检由 Codex 在本地执行。第三题的审核稿依据题面与代码形成，没有运行被审核代码。
-当前版本交由候选人审核，尚未记录候选人完成的人工核验。建议审核时对照固定版本的源码核查归一化顺序，手算上述两个合成例子，并逐条对照第三题列出的代码依据；完成后再记录实际核验情况。
+AI 辅助完成论文与代码分析、实现、测试、题目设计及审核文本，人工核验待完成。
