@@ -81,6 +81,26 @@ def test_seed_must_be_a_candidate_and_return_actual_label(solve):
     assert_array_equal(out["final_mask"], [[False, False, True], [True, False, False]])
 
 
+def test_seed_uses_normalized_prototype_when_patch_means_reverse_ranking(solve):
+    target = np.array([
+        [0, 0.6, 0.8], [0, 0.6, -0.8],
+        [0, 0.8, 0.6], [0, 0.8, 0.6],
+    ]).reshape(1, 4, 3)
+    out = solve(
+        reference_prototype=np.array([0.0, 1.0, 0.0]),
+        target_original=target, target_debiased=target.copy(),
+        cluster_labels=np.array([[0, 0, 1, 1]]),
+        candidate_mask=np.ones((1, 4), dtype=bool), threshold=0.5,
+    )
+    # Normalized prototypes score [1, 0.8]; patch means score [0.6, 0.8].
+    assert out["seed_id"] == 0
+    assert_allclose(out["cross_similarity"], [0.6, 0.8], atol=1e-12)
+    assert_allclose(out["intra_similarity"], [1, 0.8], atol=1e-12)
+    assert_allclose(out["area_weights"], [1, 1], atol=1e-12)
+    assert_allclose(out["combined_scores"], [0.6, 0.64], atol=1e-12)
+    assert_array_equal(out["final_mask"], np.ones((1, 4), dtype=bool))
+
+
 def test_strict_threshold_on_exact_binary_fractions(solve):
     # Unit coordinate vectors and 1/2 coverage give exactly representable
     # scores: a threshold test must not depend on sqrt(3) rounding.

@@ -157,6 +157,83 @@ def test_rank_covering_all_channels_can_remove_every_feature():
     assert_allclose(result["similarity_map"], 0, atol=1e-12)
 
 
+@pytest.mark.parametrize("position_only_reference", [True, False])
+def test_rotated_position_only_features_have_zero_scores(position_only_reference):
+    position = np.array([1.0, 2.0, 3.0])
+    probe = np.stack([position, -position]).reshape(1, 2, 3)
+    semantic = np.array([2.0, -1.0, 0.0])
+    reference = position if position_only_reference else semantic
+    target = np.eye(3) if position_only_reference else position[None, :]
+    result = match(probe, reference.reshape(1, 1, 3), np.ones((1, 1)),
+                   target.reshape(1, -1, 3), 1)
+    # A position-only vector has no residual in any channel coordinate system.
+    expected_prototype = np.zeros(3) if position_only_reference else semantic / np.sqrt(5)
+    assert_allclose(result["reference_prototype"], expected_prototype, atol=1e-12)
+    assert_array_equal(result["similarity_map"], np.zeros((1, target.shape[0])))
+
+
+@pytest.mark.parametrize("extra_channels", [0, 1019])
+def test_random_full_channel_basis_removes_every_feature(extra_channels):
+    rng = np.random.default_rng(0)
+    probe = rng.normal(size=(3, 4, 5))
+    reference = rng.normal(size=(1, 1, 5))
+    target = rng.normal(size=(1, 3, 5))
+    padding = ((0, 0), (0, 0), (0, extra_channels))
+    result = match(np.pad(probe, padding), np.pad(reference, padding),
+                   np.ones((1, 1)), np.pad(target, padding), 5)
+    basis = result["basis"]
+    assert_allclose(basis[:5] @ basis[:5].T, np.eye(5), atol=1e-12)
+    assert_allclose(basis[5:], 0, atol=1e-12)
+    assert_array_equal(result["reference_prototype"], np.zeros(5 + extra_channels))
+    assert_array_equal(result["similarity_map"], np.zeros((1, 3)))
+
+
+@pytest.mark.parametrize("semantic_strength", [1e-12, 1e-16])
+def test_zero_padded_channels_preserve_small_semantic_matching(semantic_strength):
+    probe = np.array([[[1.0, 0, 0], [-1.0, 0, 0]]])
+    reference = np.array([[[1.0, semantic_strength, 0]]])
+    target = np.array([[[1.0, semantic_strength, 0], [1.0, 0, semantic_strength]]])
+    expected_similarity = np.array([[semantic_strength / 1e-12, 0]])
+    baseline = None
+    for channels in (3, 16, 1024):
+        padding = ((0, 0), (0, 0), (0, channels - 3))
+        result = match(np.pad(probe, padding), np.pad(reference, padding),
+                       np.ones((1, 1)), np.pad(target, padding), 1)
+        # e0 is removed exactly; the semantic axes never enter the projection.
+        expected_prototype = np.zeros(channels)
+        expected_prototype[1] = 1.0
+        assert_allclose(result["reference_prototype"], expected_prototype, atol=1e-12)
+        assert_allclose(result["similarity_map"], expected_similarity, rtol=1e-12, atol=0)
+        if baseline is None:
+            baseline = result["similarity_map"]
+        else:
+            assert_array_equal(result["similarity_map"], baseline)
+
+
+def test_small_semantic_residual_above_roundoff_is_preserved():
+    inputs = valid_inputs()
+    inputs.update(
+        reference_features=np.array([[[1.0, 1e-13, 0.0]]]),
+        target_features=np.array([[[1.0, 1e-13, 0.0], [1.0, 0.0, 1e-13]]]),
+    )
+    result = match(**inputs)
+    # The residual is below the normalization floor, but above rounding error.
+    assert_allclose(result["reference_prototype"], [0, 1, 0], atol=1e-12)
+    assert_allclose(result["similarity_map"], [[0.1, 0]], atol=1e-12)
+
+
+def test_roundoff_cutoff_scales_with_small_input_features():
+    inputs = valid_inputs()
+    inputs.update(
+        reference_features=np.array([[[0.0, 1e-30, 0.0]]]),
+        target_features=np.array([[[0.0, 1e-30, 0.0]]]),
+    )
+    result = match(**inputs)
+    # A small semantic vector must survive; an absolute cutoff would erase it.
+    assert_allclose(result["reference_prototype"], [0, 1, 0], atol=1e-12)
+    assert_allclose(result["similarity_map"], [[1e-6]], rtol=1e-12, atol=0)
+
+
 def test_positive_patch_scaling_and_joint_channel_rotation_preserve_matching():
     rng = np.random.default_rng(19)
     inputs = dict(probe_features=rng.normal(size=(2, 4, 5)),

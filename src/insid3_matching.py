@@ -48,6 +48,39 @@ def _normalize(vectors: np.ndarray) -> np.ndarray:
     return direction * factor
 
 
+def _projection_residual(rows: np.ndarray, basis: np.ndarray) -> np.ndarray:
+    """Project out the basis and discard rows explained by rounding error."""
+    channels, rank = basis.shape
+    if rank == 0:
+        return rows
+    if rank == channels:
+        # The orthogonal complement of a complete basis is exactly {0}.
+        return np.zeros_like(rows)
+
+    coefficients = rows @ basis
+    projected = coefficients @ basis.T
+    residual = rows - projected
+
+    # Bound each dot product using its nonzero terms, so padding the basis
+    # with zero channels cannot increase the operation count.
+    unit_roundoff = np.finfo(rows.dtype).eps / 2
+    abs_basis = np.abs(basis)
+    inner_terms = np.count_nonzero(basis, axis=0)
+    outer_terms = np.count_nonzero(basis, axis=1)
+    inner_gamma = inner_terms * unit_roundoff / (1 - inner_terms * unit_roundoff)
+    outer_gamma = outer_terms * unit_roundoff / (1 - outer_terms * unit_roundoff)
+    coefficient_error = inner_gamma * (np.abs(rows) @ abs_basis)
+    projection_error = coefficient_error @ abs_basis.T
+    projection_error += outer_gamma * (np.abs(coefficients) @ abs_basis.T)
+    subtraction_error = unit_roundoff * (np.abs(rows) + np.abs(projected))
+    tolerance = 8 * (projection_error + subtraction_error)
+
+    # Require every channel to be within its own error estimate. A semantic
+    # channel absent from the basis cannot inherit error from positional axes.
+    roundoff_only = np.all(np.abs(residual) <= tolerance, axis=-1, keepdims=True)
+    return np.where(roundoff_only, 0.0, residual)
+
+
 def compute_debiased_similarity(
     probe_features: np.ndarray,
     reference_features: np.ndarray,
@@ -67,8 +100,10 @@ def compute_debiased_similarity(
     Returns:
         Float64 arrays: basis (C, r), reference_prototype (C,), and
         similarity_map (Ht, Wt). Zero vectors use an L2 denominator floor
-        of 1e-12. rank=0 removes no directions. The SVD slice is not
-        truncated by numerical rank; null singular directions are nonunique.
+        of 1e-12. Residual rows within per-channel projection error estimates
+        are set to zero before normalization. rank=0 removes no directions.
+        The SVD slice is not truncated by numerical rank; null singular
+        directions are nonunique.
 
     Raises:
         TypeError: Non-array input, non-real features, or non-integer rank.
@@ -114,8 +149,7 @@ def compute_debiased_similarity(
     def debias(grid: np.ndarray) -> np.ndarray:
         rows = _normalize(grid.reshape(-1, channels))
         # Same projection for both images; no centering of either image.
-        residual = rows - (rows @ basis) @ basis.T
-        return _normalize(residual)
+        return _normalize(_projection_residual(rows, basis))
 
     reference_rows = debias(reference)
     target_rows = debias(target)
