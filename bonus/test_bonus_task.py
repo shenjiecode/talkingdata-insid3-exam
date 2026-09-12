@@ -81,15 +81,25 @@ def test_seed_must_be_a_candidate_and_return_actual_label(solve):
     assert_array_equal(out["final_mask"], [[False, False, True], [True, False, False]])
 
 
-@pytest.mark.parametrize("threshold,expected", [
-    (0.25, [1, 1, 0, 0, 0, 0, 0, 0]),
-    (1.0, [0, 0, 0, 0, 0, 0, 0, 0]),
-])
-def test_author_code_strict_threshold_without_forced_seed_union(solve, threshold, expected):
+def test_strict_threshold_on_exact_binary_fractions(solve):
+    # Unit coordinate vectors and 1/2 coverage give exactly representable
+    # scores: a threshold test must not depend on sqrt(3) rounding.
+    target = np.tile([0.0, 1.0, 0.0], (1, 4, 1))
+    out = solve(
+        reference_prototype=np.array([0.0, 1.0, 0.0]),
+        target_original=target, target_debiased=target.copy(),
+        cluster_labels=np.array([[0, 0, 1, 1]]),
+        candidate_mask=np.array([[1, 0, 1, 0]], dtype=bool), threshold=0.5,
+    )
+    assert_allclose(out["combined_scores"], [1, 0.5], atol=0, rtol=0)
+    assert_array_equal(out["final_mask"], [[True, True, False, False]])
+
+
+def test_author_code_does_not_force_seed_union(solve):
     inputs = main_case()
-    inputs["threshold"] = threshold
+    inputs["threshold"] = 1.0
     out = solve(**inputs)
-    assert_array_equal(out["final_mask"], np.array(expected, dtype=bool).reshape(2, 4))
+    assert_array_equal(out["final_mask"], np.zeros((2, 4), dtype=bool))
 
 
 def test_empty_candidates_return_explicit_empty_result(solve):
